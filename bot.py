@@ -51,8 +51,6 @@ BOT_DESCRIPTION = (
     "Ежедневный бонус — 25 ₽. Вывод от 2 500 ₽ на карту или СБП обрабатывается вручную. "
     "Рекламная рассылка в боте — 3 000 ₽; объявления публикуются после проверки администратором."
 )
-SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "vladofix97").strip().lstrip("@") or "vladofix97"
-SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
 REVIEWS_URL = os.getenv("REVIEWS_URL", "").strip()
 DB_PATH = os.getenv("DB_PATH", "bot_data_advanced.sqlite3").strip() or "bot_data_advanced.sqlite3"
 YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "").strip()
@@ -82,7 +80,7 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = logging.getLogger("vlado_bonus")
+log = logging.getLogger("priglashay_plus")
 
 BTN_LINK = "🔗 Моя ссылка"
 BTN_PROFILE = "👤 Профиль"
@@ -170,10 +168,6 @@ def menu_keyboard(user_id: int) -> ReplyKeyboardMarkup:
     if ADMIN_ID and user_id == ADMIN_ID:
         rows.append([BTN_ADMIN])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
-
-
-def support_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("💬 Написать в поддержку", url=SUPPORT_URL)]])
 
 
 def public_ad_keyboard() -> InlineKeyboardMarkup:
@@ -858,7 +852,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     result = store(context).register_user(user.id, user.username, user.first_name or "", ref, iso_now())
     record = store(context).get_user(user.id)
     if record and record["banned"]:
-        await message.reply_text("Доступ к боту ограничен. Напиши в поддержку, если считаешь это ошибкой.", reply_markup=support_keyboard())
+        await message.reply_text("Доступ к боту ограничен. Если считаешь это ошибкой, отправь команду /support.")
         return
     for reward in result["rewards"]:
         try:
@@ -981,14 +975,14 @@ async def show_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"Минимум: <b>{money(MIN_WITHDRAWAL)}</b>\nСпособы: карта или СБП. Заявки проверяются вручную.\n\n"
     )
     if p["balance_kopeks"] < MIN_WITHDRAWAL:
-        text += f"До минимума не хватает {money(MIN_WITHDRAWAL - p['balance_kopeks'])}. Реквизиты передаются поддержке с номером заявки; бот их не хранит."
+        text += f"До минимума не хватает {money(MIN_WITHDRAWAL - p['balance_kopeks'])}. После достижения минимума можно будет создать заявку и передать реквизиты администратору через бота."
         await send_banner(message, "withdrawal.png", text, menu_keyboard(user.id))
         return
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Банковская карта", callback_data="withdraw:method:card")],
         [InlineKeyboardButton("📱 СБП", callback_data="withdraw:method:sbp")],
     ])
-    await send_banner(message, "withdrawal.png", text + "Выбери способ. Не отправляй полный номер карты или коды в этот бот.", keyboard)
+    await send_banner(message, "withdrawal.png", text + "Выбери способ. Реквизиты запрашиваются только после создания заявки; не отправляй CVV, PIN или коды из SMS.", keyboard)
 
 
 async def show_reviews(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1022,12 +1016,45 @@ async def show_how(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_message:
-        await update.effective_message.reply_text(
-            f"🆘 Поддержка: @{esc(SUPPORT_USERNAME)}\nПо заявке на вывод или рекламу укажи её номер.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=support_keyboard(),
-        )
+    message, user = update.effective_message, update.effective_user
+    if not message or not user:
+        return
+    if context.user_data.get("withdraw_state") == "amount":
+        context.user_data.pop("withdraw_state", None)
+        context.user_data.pop("withdraw_method", None)
+    context.user_data["support_state"] = "waiting"
+    withdrawal_id = context.user_data.get("support_withdrawal_id")
+    case_text = f" по заявке на вывод #{withdrawal_id}" if withdrawal_id else ""
+    await message.reply_text(
+        f"🆘 Напиши вопрос{case_text} одним текстовым сообщением — оно будет передано администратору через бота.\n"
+        "Не отправляй пароли, CVV/CVC, PIN-коды или коды из SMS. /cancel — отмена."
+    )
+
+
+async def forward_support_message(message, user, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (message.text or "").strip()
+    if not text:
+        await message.reply_text("Отправь обращение текстом одним сообщением.")
+        return
+    if len(text) > 3000:
+        await message.reply_text("Сообщение слишком длинное. Сократи его до 3 000 символов.")
+        return
+    withdrawal_id = context.user_data.get("support_withdrawal_id")
+    title = f"Реквизиты/обращение по заявке на вывод #{withdrawal_id}" if withdrawal_id else "Обращение в поддержку"
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Ответить пользователю", callback_data=f"support:reply:{user.id}")]])
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=(
+            f"🆘 <b>{title}</b>\n"
+            f"Пользователь: <a href=\"tg://user?id={user.id}\">{esc(user.full_name)}</a> · ID <code>{user.id}</code>\n\n"
+            f"<pre>{esc(text)}</pre>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+    )
+    context.user_data.pop("support_state", None)
+    context.user_data.pop("support_withdrawal_id", None)
+    await message.reply_text("✅ Сообщение передано администратору. Если понадобится, ответ придёт в этот чат.")
 
 
 async def create_ad_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1036,7 +1063,7 @@ async def create_ad_order(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     rec = store(context).get_user(user.id)
     if rec and rec["banned"]:
-        await message.reply_text("Доступ ограничен. Обратись в поддержку.", reply_markup=support_keyboard())
+        await message.reply_text("Доступ ограничен. Если считаешь это ошибкой, отправь команду /support.")
         return
     active = store(context).active_ad_order(user.id)
     if active:
@@ -1052,7 +1079,7 @@ async def create_ad_order(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await message.reply_text(f"Заказ рекламы #{active['id']} сейчас в статусе «{esc(active['status'])}». Новую заявку можно создать после его обработки.", parse_mode=ParseMode.HTML)
         return
     if not YOOMONEY_WALLET:
-        await message.reply_text("Заказ рекламы временно не настроен. Напиши в поддержку.", reply_markup=support_keyboard())
+        await message.reply_text("Заказ рекламы пока не настроен. Попробуй позже.")
         return
     label = "VB-AD-" + secrets.token_hex(8).upper()
     pay_url = payment_url(label)
@@ -1062,7 +1089,7 @@ async def create_ad_order(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"📣 <b>Заказ рекламы #{order_id}</b>\n\n"
         f"Стоимость: <b>{money(AD_PRICE_KOPEKS)}</b>.\n"
         "После оплаты бот сверит поступление по уникальной метке заказа. Затем отправь одним сообщением текст (можно со ссылкой) или изображение с подписью.\n"
-        "Перед публикацией объявление проверит администратор. Неподходящий материал не будет разослан; возврат при отклонении обрабатывается вручную через поддержку.\n\n"
+        "Перед публикацией объявление проверит администратор. Неподходящий материал не будет разослан; возврат при отклонении оформляется вручную. По вопросу отправь /support.\n\n"
         f"Метка платежа: <code>{esc(label)}</code>"
     )
     await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=ad_order_keyboard(order))
@@ -1178,7 +1205,7 @@ async def process_ad_content(message, user, context: ContextTypes.DEFAULT_TYPE, 
         order["id"], user.id, message.chat_id, message.message_id, content_text, file_id, iso_now()
     )
     if not ok:
-        await message.reply_text("Не удалось сохранить объявление; напиши в поддержку.", reply_markup=support_keyboard())
+        await message.reply_text("Не удалось сохранить объявление. Попробуй позже или отправь /support.")
         return
     admin_kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Одобрить и разослать", callback_data=f"ad:approve:{order['id']}")],
@@ -1373,7 +1400,7 @@ async def admin_withdrawals_view(message, context: ContextTypes.DEFAULT_TYPE) ->
     if not items:
         await message.reply_text("💸 Ожидающих заявок на вывод нет.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Панель", callback_data="admin:home")]]))
         return
-    lines = ["💸 <b>Ожидающие выводы</b>\nРеквизиты бот не хранит — для выплаты свяжись с пользователем по Telegram ID."]
+    lines = ["💸 <b>Ожидающие выводы</b>\nРеквизиты, отправленные пользователями, приходят администратору отдельными сообщениями через бота."]
     buttons = []
     for w in items:
         display = w["first_name"] or ("@" + w["username"] if w["username"] else str(w["user_id"]))
@@ -1445,7 +1472,7 @@ async def export_users(message, context: ContextTypes.DEFAULT_TYPE) -> None:
             r["level1_referrals"], r["level2_referrals"], r["level3_referrals"], r["blocked"], r["banned"], r["ads_opt_out"],
         ])
     data = io.BytesIO(text.getvalue().encode("utf-8-sig"))
-    data.name = "vlado_bonus_users.csv"
+    data.name = "priglashay_plus_users.csv"
     await message.reply_document(document=data, filename=data.name, caption=f"Экспортировано пользователей: {len(rows)}")
 
 
@@ -1480,6 +1507,24 @@ async def begin_admin_search(message, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def admin_message_state(message, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if context.user_data.get("admin_state") == "support_reply":
+        target_id = context.user_data.get("support_reply_user_id")
+        text = (message.text or "").strip()
+        if not text:
+            await message.reply_text("Напиши ответ обычным текстом или нажми /cancel.")
+            return True
+        if len(text) > 3500:
+            await message.reply_text("Ответ слишком длинный. Сократи его до 3 500 символов.")
+            return True
+        try:
+            await context.bot.send_message(int(target_id), "🆘 Ответ администратора:\n\n" + text)
+        except (TelegramError, TypeError, ValueError):
+            await message.reply_text("Не удалось отправить ответ. Проверь, что пользователь не заблокировал бота.")
+        else:
+            await message.reply_text("✅ Ответ отправлен пользователю.")
+        context.user_data.pop("admin_state", None)
+        context.user_data.pop("support_reply_user_id", None)
+        return True
     if context.user_data.get("admin_state") == "broadcast_wait":
         await preview_broadcast(message, context)
         return True
@@ -1501,21 +1546,8 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if user.id == ADMIN_ID and await admin_message_state(message, context):
         return
-    record = store(context).get_user(user.id)
-    if record and record["banned"] and user.id != ADMIN_ID:
-        await message.reply_text("Доступ к боту ограничен. Свяжись с поддержкой, если считаешь это ошибкой.", reply_markup=support_keyboard())
-        return
 
     text = (message.text or "").strip()
-    if context.user_data.get("withdraw_state") == "amount":
-        menu_buttons = {BTN_LINK, BTN_PROFILE, BTN_BONUS, BTN_WITHDRAW, BTN_AD, BTN_HOW, BTN_REVIEWS, BTN_SUPPORT, BTN_HOME, BTN_ADMIN}
-        if text in menu_buttons:
-            await message.reply_text("Сначала введи сумму вывода или нажми /cancel, чтобы выйти из заявки.")
-        elif message.text:
-            await menu_text_handler(update, context)
-        else:
-            await message.reply_text("Введи сумму текстом или нажми /cancel.")
-        return
     route = {
         BTN_LINK: show_link,
         BTN_PROFILE: show_profile,
@@ -1528,7 +1560,28 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         BTN_HOME: show_home,
         BTN_ADMIN: admin_command,
     }
+    if text == BTN_SUPPORT:
+        await show_support(update, context)
+        return
+    if context.user_data.get("support_state") and text not in route:
+        await forward_support_message(message, user, context)
+        return
+
+    record = store(context).get_user(user.id)
+    if record and record["banned"] and user.id != ADMIN_ID:
+        await message.reply_text("Доступ к боту ограничен. Если считаешь это ошибкой, отправь команду /support.")
+        return
+
+    if context.user_data.get("withdraw_state") == "amount":
+        if text in route:
+            await message.reply_text("Сначала введи сумму вывода или нажми /cancel, чтобы выйти из заявки.")
+        elif message.text:
+            await menu_text_handler(update, context)
+        else:
+            await message.reply_text("Введи сумму текстом или нажми /cancel.")
+        return
     if text in route:
+        context.user_data.pop("support_state", None)
         await route[text](update, context)
         return
     active = store(context).active_ad_order(user.id)
@@ -1547,6 +1600,8 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data.pop("broadcast_source_message_id", None)
     context.user_data.pop("withdraw_state", None)
     context.user_data.pop("withdraw_method", None)
+    context.user_data.pop("support_state", None)
+    context.user_data.pop("support_reply_user_id", None)
     if update.effective_message:
         await update.effective_message.reply_text("Действие отменено.", reply_markup=menu_keyboard(update.effective_user.id))
 
@@ -1567,7 +1622,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message:
         await update.effective_message.reply_text(
-            "Команды: /start — открыть бота, /cancel — отмена ввода, /ads_off — отказаться от рекламных рассылок, /ads_on — снова включить.\nПоддержка: @" + SUPPORT_USERNAME,
+            "Команды: /start — открыть бота, /cancel — отмена ввода, /support — написать администратору через бота, /ads_off — отказаться от рекламных рассылок, /ads_on — снова включить.",
             reply_markup=menu_keyboard(update.effective_user.id),
         )
 
@@ -1644,6 +1699,21 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.message.reply_text("🔕 Ты отписался от рекламных рассылок. Вернуть их можно командой /ads_on.")
         return
 
+    if data.startswith("support:reply:"):
+        if query.from_user.id != ADMIN_ID:
+            await query.answer("Только администратор.", show_alert=True)
+            return
+        try:
+            target_id = int(data.rsplit(":", 1)[1])
+        except ValueError:
+            await query.answer("Некорректный ID пользователя.", show_alert=True)
+            return
+        await query.answer()
+        context.user_data["admin_state"] = "support_reply"
+        context.user_data["support_reply_user_id"] = target_id
+        await query.message.reply_text(f"Напиши ответ пользователю {target_id}. /cancel — отмена.")
+        return
+
     if data.startswith("admin:"):
         if query.from_user.id != ADMIN_ID:
             await query.answer("Недостаточно прав.", show_alert=True)
@@ -1689,9 +1759,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         await query.answer("Статус обновлён.")
         if action == "paid":
-            user_text = f"✅ Заявка #{raw_id} отмечена администратором как выплаченная: {money(result['amount'])}. Если перевод не пришёл, напиши @{SUPPORT_USERNAME}."
+            user_text = f"✅ Заявка #{raw_id} отмечена администратором как выплаченная: {money(result['amount'])}. Если перевод не пришёл, отправь /support."
         else:
-            user_text = f"↩️ Заявка #{raw_id} отклонена; {money(result['amount'])} возвращены на баланс. Напиши @{SUPPORT_USERNAME} за подробностями."
+            user_text = f"↩️ Заявка #{raw_id} отклонена; {money(result['amount'])} возвращены на баланс. Если есть вопросы, отправь /support."
         try:
             await context.bot.send_message(result["user_id"], user_text)
         except TelegramError:
@@ -1717,7 +1787,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             await query.message.reply_text(f"Неоплаченный заказ #{order_id} закрыт. Перед закрытием убедись, что перевод не поступил.")
             try:
-                await context.bot.send_message(cancelled["user_id"], f"Заказ рекламы #{order_id} закрыт администратором. Если ты уже оплатил, напиши @{SUPPORT_USERNAME} и укажи метку {cancelled['label']}.")
+                await context.bot.send_message(cancelled["user_id"], f"Заказ рекламы #{order_id} закрыт администратором. Если ты уже оплатил, отправь /support и укажи метку {cancelled['label']}.")
             except TelegramError:
                 pass
             return
@@ -1753,7 +1823,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             await query.message.reply_text(f"Заказ #{order_id} отклонён. Деньги бот не возвращает автоматически: свяжись с заказчиком и оформи возврат вручную, если он положен.")
             try:
-                await context.bot.send_message(order["user_id"], f"❌ Объявление по заказу #{order_id} не прошло проверку. Возврат не автоматический; напиши @{SUPPORT_USERNAME}.")
+                await context.bot.send_message(order["user_id"], f"❌ Объявление по заказу #{order_id} не прошло проверку. Возврат не автоматический. По вопросу отправь /support.")
             except TelegramError:
                 pass
             return
@@ -1804,7 +1874,7 @@ async def menu_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if context.user_data.get("withdraw_state") != "amount":
         return
     raw = message.text.strip()
-    if raw == BTN_HOME or raw == BTN_LINK or raw == BTN_PROFILE or raw == BTN_BONUS or raw == BTN_AD:
+    if raw in {BTN_HOME, BTN_LINK, BTN_PROFILE, BTN_BONUS, BTN_WITHDRAW, BTN_AD, BTN_HOW, BTN_REVIEWS, BTN_SUPPORT, BTN_ADMIN}:
         await message.reply_text("Сначала введи сумму или нажми /cancel, чтобы выйти из заявки на вывод.")
         return
     try:
@@ -1826,6 +1896,8 @@ async def menu_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data.pop("withdraw_state", None)
     context.user_data.pop("withdraw_method", None)
     wd_id = result["id"]
+    context.user_data["support_state"] = "waiting"
+    context.user_data["support_withdrawal_id"] = wd_id
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Отметить выплаченным", callback_data=f"wd:paid:{wd_id}")],
         [InlineKeyboardButton("↩️ Отклонить и вернуть", callback_data=f"wd:rejected:{wd_id}")],
@@ -1833,15 +1905,16 @@ async def menu_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     try:
         await context.bot.send_message(
             ADMIN_ID,
-            f"💸 <b>Заявка на вывод #{wd_id}</b>\nПользователь: <a href=\"tg://user?id={user.id}\">{esc(user.full_name)}</a> · ID <code>{user.id}</code>\nСумма: {money(amount)} · способ: {METHOD_LABELS.get(method, method)}\nРеквизиты бот не хранит; попроси пользователя передать их поддержке.",
+            f"💸 <b>Заявка на вывод #{wd_id}</b>\nПользователь: <a href=\"tg://user?id={user.id}\">{esc(user.full_name)}</a> · ID <code>{user.id}</code>\nСумма: {money(amount)} · способ: {METHOD_LABELS.get(method, method)}\nРеквизиты пользователь отправит отдельным сообщением через бота.",
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
     except TelegramError:
         log.exception("Cannot send withdrawal to admin")
     await message.reply_text(
-        f"✅ Заявка #{wd_id} создана. Сумма зарезервирована. Напиши @{SUPPORT_USERNAME} и передай реквизиты вместе с номером заявки; бот не хранит карту/СБП.",
-        reply_markup=support_keyboard(),
+        f"✅ Заявка #{wd_id} создана. Сумма зарезервирована.\n\n"
+        + ("Отправь сюда номер карты и имя владельца" if method == "card" else "Отправь сюда номер телефона и название банка для СБП")
+        + ". Сообщение будет передано администратору через бота. Не отправляй CVV/CVC, срок действия карты, PIN, пароль или коды из SMS.",
     )
 
 
@@ -1894,6 +1967,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", admin_stats_command), group=0)
     app.add_handler(CommandHandler("cancel", cancel_command), group=0)
     app.add_handler(CommandHandler("help", help_command), group=0)
+    app.add_handler(CommandHandler("support", show_support), group=0)
     app.add_handler(CommandHandler("ads_off", ads_off_command), group=0)
     app.add_handler(CommandHandler("ads_on", ads_on_command), group=0)
     app.add_handler(CallbackQueryHandler(callback_router), group=0)
