@@ -2,12 +2,12 @@ import os
 import sys
 import asyncio
 import logging
-import json
+import traceback
 from datetime import datetime, timedelta
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -22,18 +22,24 @@ import aiosqlite
 import aiohttp
 from dotenv import load_dotenv
 
+# Загружаем .env если он существует
 load_dotenv()
 
-# ================== НАСТРОЙКИ И КОНФИГУРАЦИЯ ==================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-BOT_USERNAME = os.getenv("BOT_USERNAME", "CashPulseRobot")
-SUPPORT_LINK = os.getenv("SUPPORT_LINK", "https://t.me/vladofix97")
+# ================== НАСТРОЙКИ (МОЖНО УКАЗАТЬ ПРЯМО ТУТ) ==================
+# Если хостинг не видит .env, впиши значения прямо в кавычки справа:
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "9291057303:AAHQYZK22NkVMS0XcH1VSgsXTso8yqiWTGI"
+BOT_USERNAME = os.getenv("BOT_USERNAME") or "CashPulseRobot"
+SUPPORT_LINK = os.getenv("SUPPORT_LINK") or "https://t.me/vladofix97"
 
-YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET", "")
-YOOMONEY_TOKEN = os.getenv("YOOMONEY_TOKEN", "")
+# Твой ID в Telegram (узнать можно в @userinfobot)
+_admin_raw = str(os.getenv("ADMIN_ID", "0")).strip()
+ADMIN_ID = int(_admin_raw) if _admin_raw.isdigit() else 0
 
-# Цены рефералов (чуть выше оригинала)
+# ЮMoney кошелек и токен
+YOOMONEY_WALLET = os.getenv("YOOMONEY_WALLET") or "4100118935779591"
+YOOMONEY_TOKEN = os.getenv("YOOMONEY_TOKEN") or "8BE176DEFDE0ED619164EB32845C863D58EDF5A49E9B0416A90FCEE9D298D24D"
+
+# Настройки тарифов
 REF_L1_REWARD = 12.50
 REF_L2_REWARD = 7.20
 REF_L3_REWARD = 3.40
@@ -45,7 +51,7 @@ AD_DURATION_HOURS = 72
 
 DB_PATH = "cashpulse.db"
 
-# Пути к изображениям меню
+# Пути к картинкам
 IMAGES = {
     "main": os.getenv("IMG_MAIN", "images/main.jpg"),
     "ref": os.getenv("IMG_REF", "images/ref.jpg"),
@@ -116,9 +122,8 @@ async def init_db():
         """)
         await db.commit()
 
-# ================== ВСПОМОГАТЕЛЬНЫЙ ОТПРАВЩИК МЕНЮ ==================
+# ================== ОТПРАВКА МЕНЮ ==================
 async def send_menu_ui(bot: Bot, chat_id: int, menu_key: str, text: str, reply_markup: InlineKeyboardMarkup, delete_message_id: Optional[int] = None):
-    """Отправляет фото с меню, если картинка существует. Если нет — отправляет просто текст."""
     if delete_message_id:
         try:
             await bot.delete_message(chat_id, delete_message_id)
@@ -131,7 +136,7 @@ async def send_menu_ui(bot: Bot, chat_id: int, menu_key: str, text: str, reply_m
             photo = FSInputFile(img_path)
             return await bot.send_photo(chat_id=chat_id, photo=photo, caption=text, reply_markup=reply_markup, parse_mode="HTML")
         except Exception as e:
-            logging.error(f"Ошибка отправки фото {img_path}: {e}")
+            logging.error(f"Ошибка загрузки фото {img_path}: {e}")
 
     return await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
 
@@ -158,7 +163,7 @@ def get_back_keyboard():
 
 # ================== ЮMONEY ИНТЕГРАЦИЯ ==================
 def generate_yoomoney_url(label: str, amount: float = AD_PRICE) -> str:
-    target = "Оплата рекламы в боте CashPulse"
+    target = "Оплата рекламы CashPulse"
     return (
         f"https://yoomoney.ru/quickpay/confirm.xml?"
         f"receiver={YOOMONEY_WALLET}&quickpay-form=shop&targets={target}&"
@@ -166,7 +171,7 @@ def generate_yoomoney_url(label: str, amount: float = AD_PRICE) -> str:
     )
 
 async def check_yoomoney_payment(label: str, min_sum: float = AD_PRICE) -> bool:
-    if not YOOMONEY_TOKEN:
+    if not YOOMONEY_TOKEN or YOOMONEY_TOKEN.startswith("ВСТАВЬ"):
         return False
     url = "https://yoomoney.ru/api/operation-history"
     headers = {
@@ -187,7 +192,7 @@ async def check_yoomoney_payment(label: str, min_sum: float = AD_PRICE) -> bool:
         logging.error(f"Ошибка проверки оплаты ЮMoney: {e}")
     return False
 
-# ================== ФОНОВАЯ ОЧИСТКА РЕКЛАМЫ ЧЕРЕЗ 72 ЧАСА ==================
+# ================== АВТОУДАЛЕНИЕ РЕКЛАМЫ (72 ЧАСА) ==================
 async def ads_cleanup_loop(bot: Bot):
     while True:
         try:
@@ -220,27 +225,27 @@ async def ads_cleanup_loop(bot: Bot):
                     try:
                         await bot.send_message(
                             chat_id=user_id,
-                            text="⏱ <b>Срок вашей рекламы (72 часа) истек!</b>\nВсе рекламные сообщения успешно удалены из бота."
+                            text="⏱ <b>Срок вашей рекламы (72 часа) завершен!</b>\nВсе посты удалены."
                         )
                     except Exception:
                         pass
         except Exception as e:
-            logging.error(f"Ошибка в цикле автоудаления рекламы: {e}")
+            logging.error(f"Ошибка автоудаления рекламы: {e}")
 
-# ================== РЕФЕРАЛЬНЫЕ НАЧИСЛЕНИЯ ==================
+# ================== НАЧИСЛЕНИЕ РЕФЕРАЛОВ ==================
 async def process_referral(bot: Bot, new_user_id: int, referrer_id: int):
     rewards = [
         (1, REF_L1_REWARD, "1-го уровня"),
         (2, REF_L2_REWARD, "2-го уровня"),
         (3, REF_L3_REWARD, "3-го уровня")
     ]
-    current_ref_id = referrer_id
+    curr_id = referrer_id
 
     async with aiosqlite.connect(DB_PATH) as db:
         for level, reward, lvl_text in rewards:
-            if not current_ref_id:
+            if not curr_id:
                 break
-            async with db.execute("SELECT user_id, referrer_id FROM users WHERE user_id = ?", (current_ref_id,)) as cursor:
+            async with db.execute("SELECT user_id, referrer_id FROM users WHERE user_id = ?", (curr_id,)) as cursor:
                 row = await cursor.fetchone()
                 if not row:
                     break
@@ -249,35 +254,35 @@ async def process_referral(bot: Bot, new_user_id: int, referrer_id: int):
                 UPDATE users 
                 SET balance = balance + ?, earned_ref = earned_ref + ?
                 WHERE user_id = ?
-            """, (reward, reward, current_ref_id))
+            """, (reward, reward, curr_id))
 
             try:
                 await bot.send_message(
-                    chat_id=current_ref_id,
-                    text=f"🎉 <b>Новый реферал {lvl_text}!</b>\nНачислено на баланс: <b>+{reward:.2f} ₽</b>"
+                    chat_id=curr_id,
+                    text=f"🎉 <b>Новый реферал {lvl_text}!</b>\nНачислено: <b>+{reward:.2f} ₽</b>"
                 )
             except Exception:
                 pass
 
-            current_ref_id = row[1]
+            curr_id = row[1]
         await db.commit()
 
-# ================== ХЭНДЛЕРЫ ==================
+# ================== ОБРАБОТЧИКИ ==================
 dp = Dispatcher(storage=MemoryStorage())
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot):
     user_id = message.from_user.id
-    first_name = message.from_user.first_name or "Пользователь"
+    first_name = message.from_user.first_name or "Друг"
     username = message.from_user.username or ""
 
     args = message.text.split()
     referrer_id = None
     if len(args) > 1 and args[1].startswith("ref_"):
         try:
-            possible_ref = int(args[1].replace("ref_", ""))
-            if possible_ref != user_id:
-                referrer_id = possible_ref
+            pos_ref = int(args[1].replace("ref_", ""))
+            if pos_ref != user_id:
+                referrer_id = pos_ref
         except ValueError:
             referrer_id = None
 
@@ -320,7 +325,6 @@ async def cb_main(call: CallbackQuery, bot: Bot):
     await call.answer()
     await show_main_menu(bot, call.message.chat.id, call.from_user.id, call.from_user.first_name, call.message.message_id)
 
-# ----------------- РЕФЕРАЛЬНЫЙ ЭКРАН -----------------
 @dp.callback_query(F.data == "menu_ref")
 async def cb_ref(call: CallbackQuery, bot: Bot):
     await call.answer()
@@ -345,7 +349,7 @@ async def cb_ref(call: CallbackQuery, bot: Bot):
         f"Поделитесь ссылкой в чатах, с друзьями или в своём канале 👇"
     )
 
-    share_text = f"Зарабатывай реальные деньги прямо в Telegram! Переходи: {ref_link}"
+    share_text = f"Зарабатывай реальные деньги в Telegram! {ref_link}"
     share_url = f"https://t.me/share/url?url={ref_link}&text={share_text}"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -355,7 +359,6 @@ async def cb_ref(call: CallbackQuery, bot: Bot):
 
     await send_menu_ui(bot, call.message.chat.id, "ref", text, kb, call.message.message_id)
 
-# ----------------- ПРОФИЛЬ -----------------
 @dp.callback_query(F.data == "menu_profile")
 async def cb_profile(call: CallbackQuery, bot: Bot):
     await call.answer()
@@ -372,10 +375,9 @@ async def cb_profile(call: CallbackQuery, bot: Bot):
             return
 
         balance, pending, paid, earned_ref, earned_bonus, created_at = u
-        reg_date = created_at.split("T")[0] if "T" in created_at else created_at.split()[0]
+        reg_date = created_at.split("T")[0] if "T" in str(created_at) else str(created_at).split()[0]
         total_earned = earned_ref + earned_bonus
 
-        # Уровни рефералов
         async with db.execute("SELECT user_id FROM users WHERE referrer_id = ?", (user_id,)) as cur:
             l1_ids = [row[0] for row in await cur.fetchall()]
         l1_count = len(l1_ids)
@@ -412,14 +414,13 @@ async def cb_profile(call: CallbackQuery, bot: Bot):
         f"• за друзей: <b>{earned_ref:.2f} ₽</b>\n"
         f"• за бонусы: <b>{earned_bonus:.2f} ₽</b>\n\n"
         f"👥 Друзья (сегодня +{today_friends}):\n"
-        f"1 уровень: <b>{l1_count}</b> — заработано <b>{l1_earned:.2f} ₽</b>\n"
-        f"2 уровень: <b>{l2_count}</b> — заработано <b>{l2_earned:.2f} ₽</b>\n"
-        f"3 уровень: <b>{l3_count}</b> — заработано <b>{l3_earned:.2f} ₽</b>"
+        f"1 уровень: <b>{l1_count}</b> — <b>{l1_earned:.2f} ₽</b>\n"
+        f"2 уровень: <b>{l2_count}</b> — <b>{l2_earned:.2f} ₽</b>\n"
+        f"3 уровень: <b>{l3_count}</b> — <b>{l3_earned:.2f} ₽</b>"
     )
 
     await send_menu_ui(bot, call.message.chat.id, "profile", text, get_back_keyboard(), call.message.message_id)
 
-# ----------------- БОНУС -----------------
 @dp.callback_query(F.data == "claim_bonus")
 async def cb_bonus(call: CallbackQuery):
     user_id = call.from_user.id
@@ -430,36 +431,24 @@ async def cb_bonus(call: CallbackQuery):
             row = await cur.fetchone()
             last_bonus = row[0] if row else None
 
-        can_claim = False
-        if not last_bonus:
-            can_claim = True
-        else:
+        if last_bonus:
             lb_time = datetime.fromisoformat(last_bonus)
-            if now - lb_time >= timedelta(hours=24):
-                can_claim = True
-            else:
+            if now - lb_time < timedelta(hours=24):
                 diff = timedelta(hours=24) - (now - lb_time)
-                hours, remainder = divmod(int(diff.total_seconds()), 3600)
-                minutes, _ = divmod(remainder, 60)
-                await call.answer(
-                    f"⏳ Бонус уже получен! До следующего: {hours} ч. {minutes} мин.",
-                    show_alert=True
-                )
-                return
+                h, rem = divmod(int(diff.total_seconds()), 3600)
+                m, _ = divmod(rem, 60)
+                return await call.answer(f"⏳ Бонус уже взят! До следующего: {h}ч. {m}мин.", show_alert=True)
 
-        if can_claim:
-            await db.execute("""
-                UPDATE users 
-                SET balance = balance + ?, earned_bonus = earned_bonus + ?, last_bonus = ?
-                WHERE user_id = ?
-            """, (DAILY_BONUS, DAILY_BONUS, now.isoformat(), user_id))
-            await db.commit()
+        await db.execute("""
+            UPDATE users 
+            SET balance = balance + ?, earned_bonus = earned_bonus + ?, last_bonus = ?
+            WHERE user_id = ?
+        """, (DAILY_BONUS, DAILY_BONUS, now.isoformat(), user_id))
+        await db.commit()
 
-            await call.answer(f"🎉 Вы получили ежедневный бонус {DAILY_BONUS:.2f} ₽!", show_alert=True)
-            # Обновим главное меню
-            await show_main_menu(call.bot, call.message.chat.id, user_id, call.from_user.first_name, call.message.message_id)
+    await call.answer(f"🎉 Вы получили ежедневный бонус {DAILY_BONUS:.2f} ₽!", show_alert=True)
+    await show_main_menu(call.bot, call.message.chat.id, user_id, call.from_user.first_name, call.message.message_id)
 
-# ----------------- ВЫВОД СРЕДСТВ -----------------
 @dp.callback_query(F.data == "menu_withdraw")
 async def cb_withdraw(call: CallbackQuery, bot: Bot):
     await call.answer()
@@ -506,19 +495,13 @@ async def cb_withdraw(call: CallbackQuery, bot: Bot):
     await send_menu_ui(bot, call.message.chat.id, "withdraw", text, kb, call.message.message_id)
 
 @dp.callback_query(F.data.startswith("w_method:"))
-async def cb_withdraw_select_method(call: CallbackQuery, state: FSMContext):
+async def cb_withdraw_select(call: CallbackQuery, state: FSMContext):
     await call.answer()
     method = call.data.split(":")[1]
-    method_name = "💳 Банковская карта" if method == "card" else "⚡ Система быстрых платежей (СБП)"
-
-    await state.update_data(method=method_name)
+    name = "💳 Банковская карта" if method == "card" else "⚡ СБП"
+    await state.update_data(method=name)
     await state.set_state(WithdrawStates.waiting_for_amount)
-
-    await call.message.answer(
-        f"Вы выбрали: <b>{method_name}</b>\n\n"
-        f"Введите сумму для вывода (минимум <b>{MIN_WITHDRAW:.0f} ₽</b>):",
-        parse_mode="HTML"
-    )
+    await call.message.answer(f"Вы выбрали: <b>{name}</b>\n\nВведите сумму (минимум {MIN_WITHDRAW:.0f} ₽):", parse_mode="HTML")
 
 @dp.message(WithdrawStates.waiting_for_amount)
 async def process_withdraw_amount(message: Message, state: FSMContext):
@@ -529,21 +512,18 @@ async def process_withdraw_amount(message: Message, state: FSMContext):
         return await message.answer("⚠️ Введите корректное число (например: 3000):")
 
     if amount < MIN_WITHDRAW:
-        return await message.answer(f"⚠️ Минимальная сумма вывода составляет {MIN_WITHDRAW:.0f} ₽:")
+        return await message.answer(f"⚠️ Минимальная сумма вывода {MIN_WITHDRAW:.0f} ₽:")
 
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)) as cur:
             balance = (await cur.fetchone())[0]
 
     if amount > balance:
-        return await message.answer(f"⚠️ Недостаточно средств на балансе. Доступно: <b>{balance:.2f} ₽</b>", parse_mode="HTML")
+        return await message.answer(f"⚠️ Недостаточно средств. Баланс: <b>{balance:.2f} ₽</b>", parse_mode="HTML")
 
     await state.update_data(amount=amount)
     await state.set_state(WithdrawStates.waiting_for_details)
-
-    data = await state.get_data()
-    req_hint = "номер карты" if "карта" in data['method'].lower() else "номер телефона и банк"
-    await message.answer(f"Введите ваши реквизиты ({req_hint}):")
+    await message.answer("Введите ваши реквизиты (номер карты или телефон/банк для СБП):")
 
 @dp.message(WithdrawStates.waiting_for_details)
 async def process_withdraw_details(message: Message, state: FSMContext, bot: Bot):
@@ -570,15 +550,14 @@ async def process_withdraw_details(message: Message, state: FSMContext, bot: Bot
         await db.commit()
 
     await message.answer(
-        f"✅ <b>Заявка #{w_id} на сумму {amount:.2f} ₽ успешно создана!</b>\n\n"
+        f"✅ <b>Заявка #{w_id} на {amount:.2f} ₽ принята!</b>\n\n"
         f"Метод: {method}\n"
         f"Реквизиты: <code>{details}</code>\n"
-        f"Статус: ⏳ В обработке\n\n"
-        f"Выплаты обычно занимают от 10 минут до 24 часов.",
+        f"Статус: ⏳ В обработке",
         parse_mode="HTML"
     )
 
-    if ADMIN_ID:
+    if ADMIN_ID > 0:
         admin_kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Выплачено", callback_data=f"adm_pay:{w_id}"),
@@ -590,7 +569,7 @@ async def process_withdraw_details(message: Message, state: FSMContext, bot: Bot
                 chat_id=ADMIN_ID,
                 text=(
                     f"🚨 <b>Новая заявка на вывод #{w_id}!</b>\n\n"
-                    f"Пользователь: <code>{user_id}</code> (@{message.from_user.username})\n"
+                    f"От: <code>{user_id}</code> (@{message.from_user.username})\n"
                     f"Сумма: <b>{amount:.2f} ₽</b>\n"
                     f"Метод: <b>{method}</b>\n"
                     f"Реквизиты: <code>{details}</code>"
@@ -598,10 +577,9 @@ async def process_withdraw_details(message: Message, state: FSMContext, bot: Bot
                 reply_markup=admin_kb,
                 parse_mode="HTML"
             )
-        except Exception as e:
-            logging.error(f"Не удалось отправить уведомление админу: {e}")
+        except Exception:
+            pass
 
-# ----------------- АДМИН-ДЕЙСТВИЯ ПО ВЫВОДУ -----------------
 @dp.callback_query(F.data.startswith("adm_pay:"))
 async def cb_admin_pay(call: CallbackQuery, bot: Bot):
     if call.from_user.id != ADMIN_ID:
@@ -612,20 +590,16 @@ async def cb_admin_pay(call: CallbackQuery, bot: Bot):
         async with db.execute("SELECT user_id, amount, status FROM withdrawals WHERE id = ?", (w_id,)) as cur:
             row = await cur.fetchone()
             if not row or row[2] != 'pending':
-                return await call.answer("Заявка уже обработана!", show_alert=True)
+                return await call.answer("Уже обработано!", show_alert=True)
             u_id, amount, _ = row
 
-        await db.execute("""
-            UPDATE users 
-            SET pending_balance = pending_balance - ?, paid_balance = paid_balance + ?
-            WHERE user_id = ?
-        """, (amount, amount, u_id))
+        await db.execute("UPDATE users SET pending_balance = pending_balance - ?, paid_balance = paid_balance + ? WHERE user_id = ?", (amount, amount, u_id))
         await db.execute("UPDATE withdrawals SET status = 'paid' WHERE id = ?", (w_id,))
         await db.commit()
 
     await call.message.edit_text(call.message.text + "\n\n🟢 <b>ВЫПЛАЧЕНО</b>", parse_mode="HTML")
     try:
-        await bot.send_message(u_id, f"✅ <b>Ваша заявка #{w_id} на сумму {amount:.2f} ₽ успешно выплачена!</b>", parse_mode="HTML")
+        await bot.send_message(u_id, f"✅ Ваша заявка #{w_id} на {amount:.2f} ₽ выплачена!", parse_mode="HTML")
     except Exception:
         pass
 
@@ -639,62 +613,51 @@ async def cb_admin_reject(call: CallbackQuery, bot: Bot):
         async with db.execute("SELECT user_id, amount, status FROM withdrawals WHERE id = ?", (w_id,)) as cur:
             row = await cur.fetchone()
             if not row or row[2] != 'pending':
-                return await call.answer("Заявка уже обработана!", show_alert=True)
+                return await call.answer("Уже обработано!", show_alert=True)
             u_id, amount, _ = row
 
-        await db.execute("""
-            UPDATE users 
-            SET pending_balance = pending_balance - ?, balance = balance + ?
-            WHERE user_id = ?
-        """, (amount, amount, u_id))
+        await db.execute("UPDATE users SET pending_balance = pending_balance - ?, balance = balance + ? WHERE user_id = ?", (amount, amount, u_id))
         await db.execute("UPDATE withdrawals SET status = 'rejected' WHERE id = ?", (w_id,))
         await db.commit()
 
-    await call.message.edit_text(call.message.text + "\n\n🔴 <b>ОТКЛОНЕНО (Средства возвращены)</b>", parse_mode="HTML")
+    await call.message.edit_text(call.message.text + "\n\n🔴 <b>ОТКЛОНЕНО (Деньги возвращены)</b>", parse_mode="HTML")
     try:
-        await bot.send_message(u_id, f"❌ Ваша заявка #{w_id} на сумму {amount:.2f} ₽ была отклонена. Деньги возвращены на баланс.", parse_mode="HTML")
+        await bot.send_message(u_id, f"❌ Заявка #{w_id} отклонена. Средства возвращены на баланс.", parse_mode="HTML")
     except Exception:
         pass
 
-# ----------------- КАК ЭТО РАБОТАЕТ -----------------
 @dp.callback_query(F.data == "menu_how")
 async def cb_how(call: CallbackQuery, bot: Bot):
     await call.answer()
     text = (
         f"❓ <b>Как это работает</b>\n\n"
         f"1️⃣ Берёте свою ссылку в разделе «🔗 Моя ссылка»\n"
-        f"2️⃣ Делитесь ей с друзьями, в чатах или своём канале\n"
+        f"2️⃣ Делитесь ей с друзьями в чатах или соцсетях\n"
         f"3️⃣ Получаете деньги на баланс:\n"
-        f"• <b>{REF_L1_REWARD:.2f} ₽</b> за каждого друга, который запустил бота по вашей ссылке\n"
-        f"• <b>{REF_L2_REWARD:.2f} ₽</b> за каждого, кого пригласил ваш друг (2 уровень)\n"
-        f"• <b>{REF_L3_REWARD:.2f} ₽</b> за 3 уровень\n"
-        f"4️⃣ Дополнительно можно заработать в разделе «🎁 Бонус» — каждые 24 часа по <b>{DAILY_BONUS:.0f} ₽</b>\n\n"
-        f"💸 <b>Вывод</b> — от <b>{MIN_WITHDRAW:.0f} ₽</b> на банковскую карту или по СБП. Заявки обрабатываются быстро и без комиссий.\n\n"
-        f"⚠️ Друг засчитывается, только если он впервые запускает бота. Накрутка фейковыми аккаунтами запрещена."
+        f"• <b>{REF_L1_REWARD:.2f} ₽</b> за каждого друга\n"
+        f"• <b>{REF_L2_REWARD:.2f} ₽</b> за друга вашего друга (2 ур.)\n"
+        f"• <b>{REF_L3_REWARD:.2f} ₽</b> за 3 ур.\n"
+        f"4️⃣ Ежедневный бонус в разделе «🎁 Бонус» — <b>{DAILY_BONUS:.0f} ₽</b> раз в 24 часа!\n\n"
+        f"💸 <b>Вывод</b> от {MIN_WITHDRAW:.0f} ₽ на Карту или СБП."
     )
     await send_menu_ui(bot, call.message.chat.id, "how", text, get_back_keyboard(), call.message.message_id)
 
-# ----------------- ЗАКАЗАТЬ РЕКЛАМУ (ЮMONEY + АВТОУДАЛЕНИЕ 72 ЧАСА) -----------------
 @dp.callback_query(F.data == "menu_ad")
 async def cb_ad_menu(call: CallbackQuery, bot: Bot, state: FSMContext):
     await call.answer()
     text = (
-        f"📢 <b>Заказ рекламы в CashPulse</b>\n\n"
-        f"🌟 <b>Условия размещения:</b>\n"
-        f"• Охват: Рассылка всем активным пользователям бота\n"
-        f"• Время показа: <b>ровно 72 часа</b> (после этого бот автоматически удалит пост из всех диалогов)\n"
-        f"• Стоимость: <b>{AD_PRICE:.0f} ₽</b>\n\n"
-        f"Отправьте боту готовый рекламный пост прямо сейчас (текст, картинку с подписью или перешлите сообщение):"
+        f"📢 <b>Заказ рекламы</b>\n\n"
+        f"• Охват: Рассылка всем пользователям бота\n"
+        f"• Срок показа: <b>72 часа</b> (после пост автоматически удаляется)\n"
+        f"• Цена: <b>{AD_PRICE:.0f} ₽</b>\n\n"
+        f"Пришлите рекламный пост боту (сообщение, фото с текстом или пересылку):"
     )
     await state.set_state(AdStates.waiting_for_post)
     await send_menu_ui(bot, call.message.chat.id, "ad", text, get_back_keyboard(), call.message.message_id)
 
 @dp.message(AdStates.waiting_for_post)
-async def process_ad_post(message: Message, state: FSMContext, bot: Bot):
+async def process_ad_post(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    source_chat_id = message.chat.id
-    source_message_id = message.message_id
-
     label = f"ad_{user_id}_{int(datetime.utcnow().timestamp())}"
     now = datetime.utcnow().isoformat()
 
@@ -702,27 +665,25 @@ async def process_ad_post(message: Message, state: FSMContext, bot: Bot):
         cur = await db.execute("""
             INSERT INTO ads (user_id, label, source_chat_id, source_message_id, status, created_at)
             VALUES (?, ?, ?, ?, 'pending', ?)
-        """, (user_id, label, source_chat_id, source_message_id, now))
+        """, (user_id, label, message.chat.id, message.message_id, now))
         ad_id = cur.lastrowid
         await db.commit()
 
     await state.clear()
-
-    payment_url = generate_yoomoney_url(label, AD_PRICE)
+    pay_url = generate_yoomoney_url(label, AD_PRICE)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить {AD_PRICE:.0f} ₽", url=payment_url)],
+        [InlineKeyboardButton(text=f"💳 Оплатить {AD_PRICE:.0f} ₽", url=pay_url)],
         [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"check_ad:{ad_id}")],
         [InlineKeyboardButton(text="◀️ Отмена", callback_data="menu_main")]
     ])
 
     await message.reply(
-        f"✅ <b>Рекламный пост принят!</b>\n\n"
-        f"Заказ <code>#{ad_id}</code>\n"
+        f"✅ <b>Рекламный пост сохранен!</b> (Заказ #{ad_id})\n\n"
         f"К оплате: <b>{AD_PRICE:.0f} ₽</b>\n\n"
-        f"1. Оплатите счет по кнопке ниже через ЮMoney / Карту.\n"
-        f"2. После оплаты нажмите кнопку «🔄 Проверить оплату».\n"
-        f"3. Рассылка начнется мгновенно, а через 72 часа бот сам удалит пост.",
+        f"1. Оплатите счет по кнопке ниже.\n"
+        f"2. Нажмите «Проверить оплату».\n"
+        f"3. Бот сразу запустит рассылку и удалит её ровно через 72 часа.",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -739,18 +700,17 @@ async def cb_check_ad(call: CallbackQuery, bot: Bot):
             label, status, s_chat_id, s_msg_id = row
 
     if status == 'active':
-        return await call.answer("Этот заказ уже оплачен и запущен!", show_alert=True)
+        return await call.answer("Этот заказ уже запущен!", show_alert=True)
 
-    await call.answer("Проверяем платеж в ЮMoney...")
+    await call.answer("Проверяем зачисление...")
     is_paid = await check_yoomoney_payment(label, AD_PRICE)
 
     if not is_paid:
         return await call.message.answer(
-            "❌ <b>Оплата пока не обнаружена!</b>\nЕсли вы только что оплатили, подождите 1 минуту и нажмите кнопку снова.",
+            "❌ Оплата еще не поступила. Подождите пару секунд и нажмите снова.",
             parse_mode="HTML"
         )
 
-    # Запускаем рассылку
     expires_at = (datetime.utcnow() + timedelta(hours=AD_DURATION_HOURS)).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE ads SET status = 'active', expires_at = ? WHERE id = ?", (expires_at, ad_id))
@@ -759,7 +719,7 @@ async def cb_check_ad(call: CallbackQuery, bot: Bot):
         async with db.execute("SELECT user_id FROM users") as cur:
             users = await cur.fetchall()
 
-    await call.message.answer("🎉 <b>Оплата подтверждена! Запускаем рассылку...</b>", parse_mode="HTML")
+    await call.message.answer("🎉 <b>Оплата получена! Запуск рассылки...</b>", parse_mode="HTML")
 
     count = 0
     async with aiosqlite.connect(DB_PATH) as db:
@@ -768,35 +728,33 @@ async def cb_check_ad(call: CallbackQuery, bot: Bot):
                 sent = await bot.copy_message(chat_id=u_id, from_chat_id=s_chat_id, message_id=s_msg_id)
                 await db.execute("INSERT INTO ad_messages (ad_id, chat_id, message_id) VALUES (?, ?, ?)", (ad_id, u_id, sent.message_id))
                 count += 1
-                await asyncio.sleep(0.04) # защита от лимитов Telegram
+                await asyncio.sleep(0.04)
             except Exception:
                 pass
         await db.commit()
 
-    await call.message.answer(
-        f"🚀 <b>Реклама успешно разослана!</b>\n\n"
-        f"Получателей: {count}\n"
-        f"Пост будет автоматически удален ботом через <b>72 часа</b>.",
-        parse_mode="HTML"
-    )
+    await call.message.answer(f"🚀 Разослано {count} пользователям. Сообщения удалятся через 72 часа.")
 
-# ================== СТАРТ БОТА ==================
+# ================== СТАРТ ==================
 async def main():
-    if not BOT_TOKEN:
-        print("ОШИБКА: Задайте BOT_TOKEN в файле .env!")
-        sys.exit(1)
+    if not BOT_TOKEN or "ВСТАВЬ" in BOT_TOKEN:
+        print("\n\n❌ ОШИБКА: BOT_TOKEN не указан! Укажите токен в .env или в main.py на 22 строке.\n\n")
+        return
 
+    print("Запуск базы данных...")
     await init_db()
+    
     bot = Bot(token=BOT_TOKEN)
-
-    # Запуск фонового процесса очистки объявлений каждые 60 сек
     asyncio.create_task(ads_cleanup_loop(bot))
-
-    logging.info("Бот CashPulse успешно запущен!")
+    
+    print("✅ Бот CashPulse успешно стартовал и слушает сообщения!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logging.info("Бот остановлен.")
+        print("Бот остановлен.")
+    except Exception as e:
+        print("КРИТИЧЕСКАЯ ОШИБКА ПРИ СТАРТЕ:")
+        traceback.print_exc()
