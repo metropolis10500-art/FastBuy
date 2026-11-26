@@ -345,6 +345,15 @@ async def cmd_start(message: Message, command: CommandObject, bot: Bot, state: F
             await process_referral_rewards(bot, referrer_id, user_id, first_name)
 
         user = get_user(user_id)
+    else:
+        # Обновляем имя и username, если пользователь их менял
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "UPDATE users SET username = ?, first_name = ? WHERE user_id = ?",
+                (username, first_name, user_id),
+            )
+            conn.commit()
+        user = get_user(user_id)
 
     await render_screen(
         bot=bot,
@@ -960,7 +969,6 @@ async def auto_delete_expired_ads_loop(bot: Bot):
                 try:
                     await bot.delete_message(chat_id=chat_id, message_id=msg_id)
                 except TelegramBadRequest:
-                    # Если Telegram API ограничивает прямое удаление старше 48ч, затираем содержимое поста
                     try:
                         await bot.edit_message_text(
                             chat_id=chat_id,
@@ -989,7 +997,7 @@ async def auto_delete_expired_ads_loop(bot: Bot):
         await asyncio.sleep(60)
 
 
-# ==================== АДМИН-ПАНЕЛЬ (КАРТИНКИ РАЗДЕЛОВ И УПРАВЛЕНИЕ) ====================
+# ==================== АДМИН-ПАНЕЛЬ (СТАТИСТИКА, КАРТИНКИ И УПРАВЛЕНИЕ) ====================
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID:
@@ -1008,19 +1016,29 @@ async def cb_admin_main(call: CallbackQuery, state: FSMContext):
 
 
 async def show_admin_panel(message: Message, edit: bool = False):
+    today = datetime.now().strftime("%Y-%m-%d")
     with sqlite3.connect(DB_PATH) as conn:
         total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        today_users = conn.execute("SELECT COUNT(*) FROM users WHERE reg_date = ?", (today,)).fetchone()[0]
         active_ads = conn.execute("SELECT COUNT(DISTINCT label) FROM ads_messages").fetchall()
         active_ads_count = len(active_ads)
 
     text = (
         f"⚙️ <b>Админ-панель бота</b>\n\n"
-        f"👥 Всего пользователей: <b>{total_users}</b>\n"
+        f"👥 Запустили бота: <b>{total_users} чел.</b> (сегодня +{today_users})\n"
         f"📢 Активных рекламных рассылок: <b>{active_ads_count}</b>\n\n"
-        f"Выберите раздел для настройки картинок или управления:"
+        f"Выберите нужный раздел управления:"
     )
 
-    buttons = []
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"📊 Статистика пользователей ({total_users} чел.)",
+                callback_data="admin:stats",
+            )
+        ]
+    ]
+
     for sec_key, sec_title in SECTIONS.items():
         has_img = "✅" if get_section_image(sec_key) else "❌"
         buttons.append(
@@ -1040,6 +1058,64 @@ async def show_admin_panel(message: Message, edit: bool = False):
         except Exception:
             pass
         await message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "admin:stats")
+async def cb_admin_stats(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        today_users = conn.execute("SELECT COUNT(*) FROM users WHERE reg_date = ?", (today,)).fetchone()[0]
+        ref_users = conn.execute("SELECT COUNT(*) FROM users WHERE referrer_id != 0").fetchone()[0]
+        direct_users = total_users - ref_users
+
+        total_balance = conn.execute("SELECT COALESCE(SUM(balance), 0) FROM users").fetchone()[0]
+        w_row = conn.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM withdrawals").fetchone()
+        w_count, w_sum = w_row[0], w_row[1]
+
+        paid_ads = conn.execute("SELECT COUNT(*) FROM ads_orders WHERE status = 'paid'").fetchone()[0]
+        last_users = conn.execute(
+            "SELECT user_id, username, first_name, reg_date FROM users ORDER BY rowid DESC LIMIT 10"
+        ).fetchall()
+
+    users_list_text = ""
+    if last_users:
+        lines = []
+        for i, u in enumerate(last_users, 1):
+            uname = f"@{u['username']}" if u["username"] else "без юзернейма"
+            lines.append(
+                f"{i}. <b>{u['first_name']}</b> ({uname}) — <code>{u['user_id']}</code> [{u['reg_date']}]"
+            )
+        users_list_text = "\n\n📋 <b>Последние 10 запустивших бота:</b>\n" + "\n".join(lines)
+
+    text = (
+        f"📊 <b>Подробная статистика бота</b>\n\n"
+        f"👥 <b>Всего запустили бота:</b> {total_users} чел.\n"
+        f"🆕 <b>Запустили сегодня:</b> +{today_users} чел.\n"
+        f"🔗 <b>Пришли по реф. ссылкам:</b> {ref_users} чел.\n"
+        f"🚶 <b>Пришли сами (напрямую):</b> {direct_users} чел.\n\n"
+        f"💰 <b>Сумма на балансах у людей:</b> {fmt_money(total_balance)} ₽\n"
+        f"⏳ <b>Заявок на вывод:</b> {w_count} шт. (на {fmt_money(w_sum)} ₽)\n"
+        f"📢 <b>Оплачено рекламных рассылок:</b> {paid_ads} шт."
+        f"{users_list_text}"
+    )
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить данные", callback_data="admin:stats")],
+            [InlineKeyboardButton(text="◀️ Назад в админку", callback_data="admin:main")],
+        ]
+    )
+
+    try:
+        await call.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest:
+        pass
+    await call.answer("📊 Статистика обновлена")
 
 
 @router.callback_query(F.data.startswith("admin:sec:"))
