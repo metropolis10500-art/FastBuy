@@ -1,28 +1,45 @@
 import os
 import sys
 import time
+import socket
 import threading
 import sqlite3
 import logging
 from datetime import datetime, timedelta
 
-import telebot
-from telebot import types
+# =====================================================================
+# 🛠 ПАТЧ: ПРИНУДИТЕЛЬНО ПЕРЕКЛЮЧАЕМ НА IPv4 (ИСПРАВЛЯЕТ ERRNO 101)
+# =====================================================================
+import urllib3.util.connection as urllib3_cn
+
+def allowed_gai_family():
+    return socket.AF_INET
+
+urllib3_cn.allowed_gai_family = allowed_gai_family
+# =====================================================================
+
 import requests
+import telebot
+from telebot import types, apihelper
+
+# Настройки таймаутов и повторов соединения
+apihelper.CONNECT_TIMEOUT = 30
+apihelper.READ_TIMEOUT = 30
+apihelper.RETRY_ON_ERROR = True
 
 # =====================================================================
-# ⚙️ НАСТРОЙКИ (ВСТАВЬ СВОИ ДАННЫЕ)
+# ⚙️ НАСТРОЙКИ БОТА
 # =====================================================================
-BOT_TOKEN = "9291057303:AAHQYZK22NkVMS0XcH1VSgsXTso8yqiWTGI"  # <--- Вставь токен сюда!
-ADMIN_ID = 9247170451                                  # <--- Твой Telegram ID (число, узнай в @userinfobot)
-BOT_USERNAME = "CashPulseRobot"               # Юзернейм бота без @
-SUPPORT_LINK = "https://t.me/vladofix97"      # Линк поддержки
+BOT_TOKEN = "9291057303:AAHQYZK22NkVMS0XcH1VSgsXTso8yqiWTGI"
+ADMIN_ID = 9247170451                                  # <--- Укажи свой Telegram ID (число)
+BOT_USERNAME = "CashPulseRobot"               # Юзернейм твоего бота без @
+SUPPORT_LINK = "https://t.me/vladofix97"      # Твой саппорт
 
-# Данные ЮMoney
+# Данные ЮMoney (для оплаты рекламы 5000 руб)
 YOOMONEY_WALLET = "4100118935779591"
 YOOMONEY_TOKEN = "8BE176DEFDE0ED619164EB32845C863D58EDF5A49E9B0416A90FCEE9D298D24D"
 
-# Настройки тарифов бота
+# Настройки тарифов
 REF_L1_REWARD = 12.50
 REF_L2_REWARD = 7.20
 REF_L3_REWARD = 3.40
@@ -34,7 +51,7 @@ AD_DURATION_HOURS = 72
 
 DB_PATH = "bot_database.db"
 
-# Пути к картинкам (если файла нет — отправится красивое текстовое меню)
+# Пути к картинкам (если картинок нет — отправится текст)
 IMAGES = {
     "main": "images/main.jpg",
     "ref": "images/ref.jpg",
@@ -103,9 +120,7 @@ def init_db():
 
 init_db()
 
-# Временное хранилище шагов вывода
 user_withdraw_data = {}
-
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 # ================== КЛАВИАТУРЫ ==================
@@ -129,7 +144,7 @@ def get_back_keyboard():
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data="menu_main"))
     return markup
 
-# ================== ОТПРАВКА МЕНЮ (С КАРТИНКОЙ ИЛИ ТЕКСТОМ) ==================
+# ================== ОТПРАВКА МЕНЮ ==================
 def send_menu_ui(chat_id, menu_key, text, markup, delete_message_id=None):
     if delete_message_id:
         try:
@@ -147,7 +162,7 @@ def send_menu_ui(chat_id, menu_key, text, markup, delete_message_id=None):
 
     return bot.send_message(chat_id, text, reply_markup=markup)
 
-# ================== ЮMONEY ИНТЕГРАЦИЯ ==================
+# ================== ЮMONEY ==================
 def generate_yoomoney_url(label: str, amount: float = AD_PRICE) -> str:
     target = "Оплата рекламы CashPulse"
     return (
@@ -174,7 +189,7 @@ def check_yoomoney_payment(label: str, min_sum: float = AD_PRICE) -> bool:
                     if float(op.get("amount", 0)) >= min_sum:
                         return True
     except Exception as e:
-        logging.error(f"Ошибка проверки оплаты ЮMoney: {e}")
+        logging.error(f"Ошибка ЮMoney: {e}")
     return False
 
 # ================== АВТОУДАЛЕНИЕ РЕКЛАМЫ (72 ЧАСА) ==================
@@ -202,7 +217,7 @@ def ads_cleanup_worker():
                     conn.commit()
 
                     try:
-                        bot.send_message(u_id, "⏱ <b>Срок вашей рекламы (72 часа) истек!</b> Все посты удалены.")
+                        bot.send_message(u_id, "⏱ <b>Срок действия рекламы (72ч) истек!</b> Сообщения удалены.")
                     except Exception:
                         pass
         except Exception as e:
@@ -573,7 +588,7 @@ def cb_how(call):
     )
     send_menu_ui(call.message.chat.id, "how", text, get_back_keyboard(), call.message.message_id)
 
-# ================== ЗАКАЗ РЕКЛАМЫ (ЮMONEY + АВТОУДАЛЕНИЕ) ==================
+# ================== ЗАКАЗ РЕКЛАМЫ ==================
 @bot.callback_query_handler(func=lambda call: call.data == "menu_ad")
 def cb_ad_menu(call):
     bot.answer_callback_query(call.id)
@@ -653,10 +668,10 @@ def cb_check_ad(call):
 
 # ================== СТАРТ ==================
 if __name__ == "__main__":
-    if "СЮДА_ВСТАВЬ" in BOT_TOKEN or len(BOT_TOKEN) < 20:
-        logging.error("ОШИБКА: ТЫ НЕ ВСТАВИЛ ТОКЕН БОТА В main.py (СТРОКА 18)!")
-        while True:
-            time.sleep(10)
-
-    logging.info("✅ Бот успешно запустился и слушает входящие запросы!")
-    bot.infinity_polling(skip_pending=True)
+    logging.info("✅ Запуск бота с поддержкой IPv4...")
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=1, timeout=20)
+        except Exception as e:
+            logging.error(f"Сетевой сбой: {e}. Переподключение через 5 секунд...")
+            time.sleep(5)
